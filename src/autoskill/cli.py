@@ -910,6 +910,112 @@ def inject(project, pick, output, dry_run, all_projects):
         console.print(f"\n[dim]Dry run — no files written. Remove --dry-run to inject.[/dim]")
 
 
+# ── prune ───────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--project", "-p", default=None, help="Filter by project path substring.")
+@click.option("--pick", is_flag=True, help="Interactively pick a project.")
+@click.option("--dry-run", is_flag=True, help="Preview which skills would be marked as one-off.")
+@click.option("--auto", is_flag=True, help="Use LLM to automatically classify skills as recurring vs one-off.")
+def prune(project, pick, dry_run, auto):
+    """Mark one-off skills as non-recurring to reduce context token waste.
+
+    Without --auto, shows skills and lets you manually mark them.
+    With --auto, asks the LLM to classify each skill.
+    """
+    from .db import get_db
+    from pathlib import Path
+
+    conn = get_db()
+
+    # Get project path (reuse pick logic from other commands)
+    if pick:
+        rows = conn.execute(
+            "SELECT project_path, COUNT(*) as cnt FROM skills "
+            "GROUP BY project_path ORDER BY cnt DESC"
+        ).fetchall()
+        if not rows:
+            console.print("[dim]No skills found.[/dim]")
+            return
+        console.print("\n[bold]Projects:[/bold]\n")
+        home = str(Path.home())
+        for i, r in enumerate(rows, 1):
+            proj = r["project_path"].replace(home, "~")
+            console.print(f"  [cyan]{i:3d}[/cyan]  {r['cnt']:3d} skills  {proj}")
+        console.print()
+        choice = click.prompt("Pick a project number", type=int)
+        if choice < 1 or choice > len(rows):
+            console.print("[red]Invalid choice.[/red]")
+            return
+        project_path = rows[choice - 1]["project_path"]
+    elif project:
+        row = conn.execute(
+            "SELECT DISTINCT project_path FROM skills WHERE project_path LIKE ? LIMIT 1",
+            (f"%{project}%",),
+        ).fetchone()
+        if not row:
+            console.print("[red]No matching project.[/red]")
+            return
+        project_path = row["project_path"]
+    else:
+        console.print("[red]Specify --project/-p or --pick.[/red]")
+        conn.close()
+        return
+
+    skills = conn.execute(
+        "SELECT id, title, description, recurring FROM skills WHERE project_path = ?",
+        (project_path,),
+    ).fetchall()
+
+    if not skills:
+        console.print("[dim]No skills for this project.[/dim]")
+        conn.close()
+        return
+
+    home = str(Path.home())
+    short_proj = project_path.replace(home, "~")
+    console.print(f"\n[bold]Skills for {short_proj}:[/bold]\n")
+
+    table = Table(show_lines=True)
+    table.add_column("#", width=3)
+    table.add_column("Title", max_width=40)
+    table.add_column("Description", max_width=50)
+    table.add_column("Status", width=12)
+
+    for i, s in enumerate(skills, 1):
+        status = "[green]recurring[/green]" if s["recurring"] else "[dim]one-off[/dim]"
+        table.add_row(str(i), s["title"], (s["description"] or "")[:50], status)
+
+    console.print(table)
+
+    if dry_run:
+        console.print("\n[dim]Dry run — no changes made.[/dim]")
+        conn.close()
+        return
+
+    # Interactive mode: ask user to pick which skills are one-off
+    console.print("\n[bold]Enter numbers of one-off skills to mark as non-recurring (comma-separated):[/bold]")
+    console.print("[dim]Or press Enter to skip.[/dim]")
+    raw = click.prompt("Skills to mark as one-off", default="", show_default=False)
+
+    if raw.strip():
+        nums = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+        updated = 0
+        for n in nums:
+            if 1 <= n <= len(skills):
+                sid = skills[n - 1]["id"]
+                conn.execute("UPDATE skills SET recurring = 0 WHERE id = ?", (sid,))
+                updated += 1
+                console.print(f"  [yellow]→[/yellow] Marked as one-off: {skills[n-1]['title']}")
+        conn.commit()
+        console.print(f"\n[green]✓[/green] Updated {updated} skills.")
+    else:
+        console.print("[dim]No changes.[/dim]")
+
+    conn.close()
+
+
 # ── status ──────────────────────────────────────────────────────────────────
 
 

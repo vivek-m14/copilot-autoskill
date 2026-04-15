@@ -53,6 +53,16 @@ any new details merged in (keep the same skill_id).
 5. If a pattern is genuinely new, create a new skill.
 6. Prefer MORE granular skills over fewer broad ones. A specific "Flatten directory \
 with symlinks" skill is better than lumping it into a generic "File operations" skill.
+7. Classify each skill as "recurring" (true) or "one-off" (false). One-off tasks are things \
+that already happened and won't need to be done again (initial setup, one-time data migrations, \
+specific bug fixes that are now resolved). Recurring tasks are workflows the user does regularly.
+8. Extract a special skill with title "Project Constants" (type: "discovery") containing \
+key project facts in the "facts" field: Python environment, working directory, data paths, \
+model architecture, device, and any formulas or naming conventions found in the conversations. \
+This eliminates tokens wasted rediscovering these per session.
+9. For recurring command patterns, include the EXACT command template in the "steps" field \
+with placeholders like <EXP_DIR>, <NAME>, <INPUT_DIR>. The [cmd] lines in the conversation \
+are the source of truth for these templates.
 
 Respond with a JSON array of skill objects (no markdown fences). Each object has:
 - "skill_id": string — reuse the existing id if updating, or "new" for new skills
@@ -64,6 +74,7 @@ Respond with a JSON array of skill objects (no markdown fences). Each object has
 - "facts": list of 2-5 discrete factual assertions (e.g. "script expects --input and --output flags", "output goes to /results/")
 - "concepts": list of 2-4 high-level concepts this relates to (e.g. "image-processing", "data-pipeline", "deployment")
 - "files": list of file/directory paths mentioned or relevant (can be empty)
+- "recurring": boolean — true if this pattern will likely recur (e.g. "run experiment comparison", "deploy model"), false if it was a one-time task (e.g. "initial data migration", "one-time zip creation", "one-time git config fix")
 
 Respond ONLY with the JSON array."""
 
@@ -198,6 +209,9 @@ def _normalize_skill(skill_data: dict) -> dict:
     valid_types = {"workflow", "bugfix", "feature", "decision", "discovery"}
     obs_type = skill_data.get("type", skill_data.get("obs_type", "workflow"))
     skill_data["obs_type"] = obs_type if obs_type in valid_types else "workflow"
+    # Normalize recurring field
+    recurring = skill_data.get("recurring", True)
+    skill_data["recurring"] = 1 if recurring else 0
     return skill_data
 
 
@@ -630,7 +644,7 @@ def distill(
                     # Update existing skill
                     conn.execute(
                         "UPDATE skills SET title=?, description=?, steps=?, tags=?, "
-                        "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=? "
+                        "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=?, recurring=? "
                         "WHERE id=?",
                         (
                             skill_data["title"],
@@ -643,6 +657,7 @@ def distill(
                             skill_data.get("files_read", "[]"),
                             skill_data.get("files_modified", "[]"),
                             skill_data.get("narrative", ""),
+                            skill_data.get("recurring", 1),
                             skill_id,
                         ),
                     )
@@ -668,7 +683,7 @@ def distill(
                         new_id = dup["id"]
                         conn.execute(
                             "UPDATE skills SET description=?, steps=?, tags=?, "
-                            "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=? "
+                            "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=?, recurring=? "
                             "WHERE id=?",
                             (
                                 skill_data.get("description", ""),
@@ -680,6 +695,7 @@ def distill(
                                 skill_data.get("files_read", "[]"),
                                 skill_data.get("files_modified", "[]"),
                                 skill_data.get("narrative", ""),
+                                skill_data.get("recurring", 1),
                                 new_id,
                             ),
                         )
@@ -688,8 +704,8 @@ def distill(
                     else:
                         conn.execute(
                             "INSERT INTO skills (id, title, description, steps, tags, project_path, "
-                            "source_session_ids, obs_type, facts, concepts, files_read, files_modified, narrative) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "source_session_ids, obs_type, facts, concepts, files_read, files_modified, narrative, recurring) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 new_id,
                                 skill_data["title"],
@@ -704,6 +720,7 @@ def distill(
                                 skill_data.get("files_read", "[]"),
                                 skill_data.get("files_modified", "[]"),
                                 skill_data.get("narrative", ""),
+                                skill_data.get("recurring", 1),
                             ),
                         )
                         stats["skills_created"] += 1

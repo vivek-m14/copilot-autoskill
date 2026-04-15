@@ -48,6 +48,9 @@ def _skill_to_dict(row) -> dict:
     for field in ("facts", "concepts", "files_read", "files_modified"):
         if field in d:
             d[field] = _parse_json_field(d[field])
+    # Ensure recurring field is exposed
+    if "recurring" not in d:
+        d["recurring"] = 1
     return d
 
 
@@ -105,6 +108,7 @@ def get_skill(skill_id: str) -> str:
     parts = [
         f"# {skill['title']}",
         f"\n**Type:** {skill.get('obs_type', 'workflow')}",
+        f"**Recurring:** {'yes' if skill.get('recurring', 1) else 'no (one-off)'}",
         f"**Description:** {skill['description']}",
         f"**Tags:** {skill['tags']}",
         f"**Project:** {skill.get('project_path', 'global')}",
@@ -142,7 +146,7 @@ def list_project_skills(project: str) -> str:
     """
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, title, description, obs_type, tags FROM skills "
+        "SELECT id, title, description, obs_type, tags, recurring FROM skills "
         "WHERE project_path LIKE ? ORDER BY created_at ASC",
         (f"%{project}%",),
     ).fetchall()
@@ -153,8 +157,9 @@ def list_project_skills(project: str) -> str:
 
     output = []
     for r in rows:
+        recurring_mark = "" if r.get("recurring", 1) else " [one-off]"
         output.append(
-            f"- **{r['title']}** [{r.get('obs_type', 'workflow')}] (id: {r['id'][:10]})\n"
+            f"- **{r['title']}** [{r.get('obs_type', 'workflow')}]{recurring_mark} (id: {r['id'][:10]})\n"
             f"  {r['description']}"
         )
     return f"Found {len(rows)} skills:\n\n" + "\n".join(output)

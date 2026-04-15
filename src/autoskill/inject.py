@@ -30,7 +30,7 @@ def load_project_skills(project_path: str, db_path=None) -> list[dict]:
     conn = get_db(db_path)
     rows = conn.execute(
         "SELECT id, title, description, steps, tags, obs_type, facts, concepts, "
-        "files_read, files_modified, narrative FROM skills "
+        "files_read, files_modified, narrative, recurring FROM skills "
         "WHERE project_path = ? ORDER BY created_at ASC",
         (project_path,),
     ).fetchall()
@@ -39,7 +39,7 @@ def load_project_skills(project_path: str, db_path=None) -> list[dict]:
 
 
 def render_instructions(skills: list[dict], project_path: str) -> str:
-    """Render skills into a copilot-instructions.md string."""
+    """Render skills into a structured copilot-instructions.md string."""
     import json as _json
     from datetime import datetime, timezone
 
@@ -48,42 +48,123 @@ def render_instructions(skills: list[dict], project_path: str) -> str:
 
     content = HEADER.format(project_name=project_name, timestamp=now)
 
-    def _fmt_json_list(val):
+    def _parse_json_list(val):
         if not val or val == "[]":
-            return ""
+            return []
         if isinstance(val, str):
             try:
                 val = _json.loads(val)
             except (ValueError, TypeError):
-                return val
-        if isinstance(val, list):
-            return "\n".join(f"- {item}" for item in val)
-        return str(val)
+                return [val] if val else []
+        return val if isinstance(val, list) else []
+
+    # Separate skills by category
+    constants = []
+    recurring_skills = []
+    oneoff_skills = []
 
     for skill in skills:
-        title = skill.get("title", "Untitled")
-        desc = skill.get("description", "")
-        steps = skill.get("steps", "")
-        tags = skill.get("tags", "")
+        title = (skill.get("title") or "").lower()
         obs_type = skill.get("obs_type", "workflow")
-        facts = _fmt_json_list(skill.get("facts", "[]"))
-        concepts = _fmt_json_list(skill.get("concepts", "[]"))
+        is_recurring = skill.get("recurring", 1)
 
-        content += f"## {title}\n\n"
-        content += f"**Type:** {obs_type}\n\n"
-        if desc:
-            content += f"{desc}\n\n"
-        if tags:
-            content += f"**Tags:** {tags}\n\n"
-        if facts:
-            content += f"**Key Facts:**\n{facts}\n\n"
-        if steps:
-            content += f"**Steps:**\n{steps}\n\n"
-        if concepts:
-            content += f"**Concepts:** {', '.join(_json.loads(skill.get('concepts', '[]'))) if isinstance(skill.get('concepts'), str) else ', '.join(skill.get('concepts', []))}\n\n"
-        content += "---\n\n"
+        if "constant" in title or "quick reference" in title or (obs_type == "discovery" and "constant" in title):
+            constants.append(skill)
+        elif is_recurring:
+            recurring_skills.append(skill)
+        else:
+            oneoff_skills.append(skill)
+
+    # Section 1: Project Constants (from discovery-type skills)
+    if constants:
+        content += "## Quick Reference\n\n"
+        for skill in constants:
+            facts = _parse_json_list(skill.get("facts", "[]"))
+            if facts:
+                for fact in facts:
+                    content += f"- {fact}\n"
+            desc = skill.get("description", "")
+            if desc:
+                content += f"\n{desc}\n"
+        content += "\n---\n\n"
+
+    # Section 2: File Map (aggregate files_read/files_modified from all skills)
+    all_files = set()
+    file_descriptions = {}
+    for skill in skills:
+        for field in ("files_read", "files_modified"):
+            files = _parse_json_list(skill.get(field, "[]"))
+            for f in files:
+                f_str = str(f)
+                all_files.add(f_str)
+                if f_str not in file_descriptions:
+                    file_descriptions[f_str] = skill.get("title", "")
+
+    if all_files:
+        content += "## Key Files\n\n"
+        for f in sorted(all_files):
+            desc = file_descriptions.get(f, "")
+            if desc:
+                content += f"- `{f}` — {desc}\n"
+            else:
+                content += f"- `{f}`\n"
+        content += "\n---\n\n"
+
+    # Section 3: Recurring Skills (the valuable ones)
+    if recurring_skills:
+        content += "## Recurring Workflows\n\n"
+        for skill in recurring_skills:
+            content += _render_skill_compact(skill, _parse_json_list)
+        content += "\n"
+
+    # Section 4: One-off reference (collapsed, minimal)
+    if oneoff_skills:
+        content += "## Reference (One-Time Tasks)\n\n"
+        content += "> These tasks are completed. Included for context only.\n\n"
+        for skill in oneoff_skills:
+            title = skill.get("title", "Untitled")
+            desc = skill.get("description", "")
+            content += f"- **{title}**: {desc}\n"
+        content += "\n"
 
     return content
+
+
+def _render_skill_compact(skill: dict, _parse_json_list) -> str:
+    """Render a single skill in compact format."""
+    import json as _json
+
+    title = skill.get("title", "Untitled")
+    desc = skill.get("description", "")
+    steps = skill.get("steps", "")
+    tags = skill.get("tags", "")
+    facts = _parse_json_list(skill.get("facts", "[]"))
+    concepts = _parse_json_list(skill.get("concepts", "[]"))
+
+    text = f"### {title}\n\n"
+    if desc:
+        text += f"{desc}\n\n"
+
+    if facts:
+        text += "**Facts:**\n"
+        for f in facts:
+            text += f"- {f}\n"
+        text += "\n"
+
+    if steps:
+        text += f"**Steps:**\n{steps}\n\n"
+
+    # Tags and concepts on one line to save space
+    meta_parts = []
+    if tags:
+        meta_parts.append(f"Tags: {tags}")
+    if concepts:
+        meta_parts.append(f"Concepts: {', '.join(str(c) for c in concepts)}")
+    if meta_parts:
+        text += f"*{' | '.join(meta_parts)}*\n\n"
+
+    text += "---\n\n"
+    return text
 
 
 def inject(
