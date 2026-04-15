@@ -18,7 +18,7 @@ from .db import get_db, DEFAULT_DB_DIR
 
 SKILLS_DIR = DEFAULT_DB_DIR / "skills"
 BATCH_SIZE = 10  # sessions per LLM call
-DEFAULT_MODEL = "claude-sonnet-4"  # good balance of cost and quality for summarization
+DEFAULT_MODEL = "claude-sonnet-4.6"  # good balance of cost and quality for summarization
 
 # ── Prompt templates ────────────────────────────────────────────────────────
 

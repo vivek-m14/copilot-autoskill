@@ -168,7 +168,7 @@ def _show_distill_status(project_filter: str | None = None):
 @main.command()
 @click.option("--project", "-p", default=None, help="Filter to projects matching this substring (e.g. -p engine_clean).")
 @click.option("--pick", is_flag=True, help="Interactively pick a project from a numbered list.")
-@click.option("--model", "-m", default=None, help="LLM model for distillation (default: claude-sonnet-4).")
+@click.option("--model", "-m", default=None, help="LLM model for distillation (default: claude-sonnet-4.6).")
 @click.option("--dry-run", is_flag=True, help="Preview batches and projects without calling the LLM.")
 @click.option("--full", is_flag=True, help="Re-distill all messages from scratch, ignoring incremental progress.")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress output; only show final summary.")
