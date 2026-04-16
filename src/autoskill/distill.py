@@ -125,9 +125,37 @@ Respond ONLY with the JSON array (no markdown fences)."""
 
 
 def _call_copilot(prompt: str, model: str | None = None) -> str:
-    """Call gh copilot in non-interactive mode and return the response text."""
-    cmd = ["gh", "copilot", "--", "-p", prompt, "--model", model or DEFAULT_MODEL]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    """Call gh copilot in non-interactive mode and return the response text.
+
+    For large prompts, writes to a temp file and uses shell expansion
+    to avoid OS argument length limits.
+    """
+    import tempfile, os
+
+    model_arg = model or DEFAULT_MODEL
+
+    # OS arg limit is ~262K on macOS but gh copilot can choke on large -p args.
+    # Use a temp file for anything over 30K chars.
+    if len(prompt) > 30_000:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="autoskill_"
+        ) as f:
+            f.write(prompt)
+            tmp_path = f.name
+        try:
+            # Use shell to expand $(cat file) into -p argument
+            shell_cmd = (
+                f'gh copilot -- -p "$(cat {tmp_path})" --model {model_arg}'
+            )
+            result = subprocess.run(
+                shell_cmd, shell=True, capture_output=True, text=True, timeout=300
+            )
+        finally:
+            os.unlink(tmp_path)
+    else:
+        cmd = ["gh", "copilot", "--", "-p", prompt, "--model", model_arg]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
     if result.returncode != 0:
         raise RuntimeError(f"gh copilot failed: {result.stderr[:500]}")
     return result.stdout.strip()
