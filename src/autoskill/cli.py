@@ -1094,3 +1094,40 @@ def serve():
     from .mcp_server import run_server
 
     run_server()
+
+
+# ── watch ───────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--debounce", "-d", default=30, show_default=True,
+              help="Seconds to wait after last file change before running pipeline.")
+@click.option("--no-inject", is_flag=True, help="Skip injecting copilot-instructions.md.")
+@click.option("--distill", is_flag=True, help="Also run LLM distill on changes (costs tokens!).")
+@click.option("--model", "-m", default=None, help="LLM model for distillation.")
+def watch(debounce, no_inject, distill, model):
+    """Live mode — watch for new conversations and auto-update skills.
+
+    \b
+    Monitors VS Code chatSessions/ for changes. When a conversation is
+    saved, automatically runs: ingest → inject (using existing skills).
+
+    \b
+    Distill is OFF by default to save tokens. Use --distill to enable,
+    or run 'autoskill distill' manually when you're ready.
+
+    \b
+    Examples:
+      autoskill watch                  # ingest + inject only (free)
+      autoskill watch --distill        # also distill (costs tokens)
+      autoskill watch -d 60            # wait 60s after last change
+    """
+    from .watcher import watch as do_watch
+
+    do_watch(
+        debounce=debounce,
+        on_event=lambda msg: console.print(msg),
+        model=model,
+        inject=not no_inject,
+        distill=distill,
+    )

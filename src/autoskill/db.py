@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS skills (
     files_read         TEXT DEFAULT '[]',        -- JSON array of file paths referenced
     files_modified     TEXT DEFAULT '[]',        -- JSON array of file paths changed
     narrative          TEXT DEFAULT '',           -- long-form explanation / context
-    recurring          BOOLEAN DEFAULT 1          -- 1 = recurring pattern, 0 = one-off task
+    recurring          BOOLEAN DEFAULT 1,         -- 1 = recurring pattern, 0 = one-off task
+    file_map           TEXT DEFAULT '{}',         -- JSON object: {filepath: [symbols]}
+    command_templates  TEXT DEFAULT '[]'          -- JSON array of {name, template, description}
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -98,6 +100,8 @@ _MIGRATIONS = [
     ("files_modified", "ALTER TABLE skills ADD COLUMN files_modified TEXT DEFAULT '[]'"),
     ("narrative", "ALTER TABLE skills ADD COLUMN narrative TEXT DEFAULT ''"),
     ("recurring", "ALTER TABLE skills ADD COLUMN recurring BOOLEAN DEFAULT 1"),
+    ("file_map", "ALTER TABLE skills ADD COLUMN file_map TEXT DEFAULT '{}'"),
+    ("command_templates", "ALTER TABLE skills ADD COLUMN command_templates TEXT DEFAULT '[]'"),
 ]
 
 

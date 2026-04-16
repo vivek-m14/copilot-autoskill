@@ -30,7 +30,8 @@ def load_project_skills(project_path: str, db_path=None) -> list[dict]:
     conn = get_db(db_path)
     rows = conn.execute(
         "SELECT id, title, description, steps, tags, obs_type, facts, concepts, "
-        "files_read, files_modified, narrative, recurring FROM skills "
+        "files_read, files_modified, narrative, recurring, file_map, command_templates "
+        "FROM skills "
         "WHERE project_path = ? ORDER BY created_at ASC",
         (project_path,),
     ).fetchall()
@@ -58,8 +59,20 @@ def render_instructions(skills: list[dict], project_path: str) -> str:
                 return [val] if val else []
         return val if isinstance(val, list) else []
 
-    # Separate skills by category
+    def _parse_json_dict(val):
+        if not val or val == "{}":
+            return {}
+        if isinstance(val, str):
+            try:
+                val = _json.loads(val)
+            except (ValueError, TypeError):
+                return {}
+        return val if isinstance(val, dict) else {}
+
+    # Classify skills by category
     constants = []
+    file_map_skills = []
+    experiment_registry = []
     recurring_skills = []
     oneoff_skills = []
 
@@ -70,12 +83,16 @@ def render_instructions(skills: list[dict], project_path: str) -> str:
 
         if "constant" in title or "quick reference" in title or (obs_type == "discovery" and "constant" in title):
             constants.append(skill)
+        elif "file map" in title or (obs_type == "discovery" and _parse_json_dict(skill.get("file_map", "{}")) ):
+            file_map_skills.append(skill)
+        elif "experiment registry" in title or "experiment" in title and "registry" in title:
+            experiment_registry.append(skill)
         elif is_recurring:
             recurring_skills.append(skill)
         else:
             oneoff_skills.append(skill)
 
-    # Section 1: Project Constants (from discovery-type skills)
+    # ── Section 1: Quick Reference (Project Constants) ──────────────────
     if constants:
         content += "## Quick Reference\n\n"
         for skill in constants:
@@ -84,40 +101,100 @@ def render_instructions(skills: list[dict], project_path: str) -> str:
                 for fact in facts:
                     content += f"- {fact}\n"
             desc = skill.get("description", "")
-            if desc:
+            if desc and not facts:
                 content += f"\n{desc}\n"
         content += "\n---\n\n"
 
-    # Section 2: File Map (aggregate files_read/files_modified from all skills)
-    all_files = set()
-    file_descriptions = {}
+    # ── Section 2: File Map (file → symbols) ────────────────────────────
+    # Aggregate file_map from all skills that have it
+    merged_file_map: dict[str, list[str]] = {}
     for skill in skills:
-        for field in ("files_read", "files_modified"):
-            files = _parse_json_list(skill.get(field, "[]"))
-            for f in files:
-                f_str = str(f)
-                all_files.add(f_str)
-                if f_str not in file_descriptions:
-                    file_descriptions[f_str] = skill.get("title", "")
+        fmap = _parse_json_dict(skill.get("file_map", "{}"))
+        for fpath, symbols in fmap.items():
+            if fpath not in merged_file_map:
+                merged_file_map[fpath] = []
+            if isinstance(symbols, list):
+                for sym in symbols:
+                    if sym not in merged_file_map[fpath]:
+                        merged_file_map[fpath].append(sym)
+            elif isinstance(symbols, str) and symbols not in merged_file_map[fpath]:
+                merged_file_map[fpath].append(symbols)
 
-    if all_files:
-        content += "## Key Files\n\n"
-        for f in sorted(all_files):
-            desc = file_descriptions.get(f, "")
-            if desc:
-                content += f"- `{f}` — {desc}\n"
-            else:
-                content += f"- `{f}`\n"
+    # Also include files_read/files_modified if no file_map data
+    if not merged_file_map:
+        file_descriptions: dict[str, str] = {}
+        for skill in skills:
+            for field in ("files_read", "files_modified"):
+                files = _parse_json_list(skill.get(field, "[]"))
+                for f in files:
+                    f_str = str(f)
+                    if f_str not in file_descriptions:
+                        file_descriptions[f_str] = skill.get("title", "")
+
+        if file_descriptions:
+            content += "## Key Files\n\n"
+            for f in sorted(file_descriptions):
+                desc = file_descriptions[f]
+                if desc:
+                    content += f"- `{f}` — {desc}\n"
+                else:
+                    content += f"- `{f}`\n"
+            content += "\n---\n\n"
+    else:
+        content += "## File Map\n\n"
+        content += "| File | Key Symbols |\n|------|-------------|\n"
+        for fpath in sorted(merged_file_map):
+            symbols = merged_file_map[fpath]
+            sym_str = ", ".join(f"`{s}`" for s in symbols[:8])
+            content += f"| `{fpath}` | {sym_str} |\n"
         content += "\n---\n\n"
 
-    # Section 3: Recurring Skills (the valuable ones)
+    # ── Section 3: Command Templates ────────────────────────────────────
+    all_templates: list[dict] = []
+    for skill in skills:
+        templates = _parse_json_list(skill.get("command_templates", "[]"))
+        for t in templates:
+            if isinstance(t, dict) and t.get("template"):
+                all_templates.append(t)
+
+    if all_templates:
+        content += "## Command Templates\n\n"
+        for t in all_templates:
+            name = t.get("name", "command")
+            template = t.get("template", "")
+            desc = t.get("description", "")
+            content += f"**{name}**"
+            if desc:
+                content += f" — {desc}"
+            content += "\n```\n"
+            content += f"{template}\n"
+            content += "```\n\n"
+        content += "---\n\n"
+
+    # ── Section 4: Experiment Registry ──────────────────────────────────
+    if experiment_registry:
+        content += "## Experiment Registry\n\n"
+        for skill in experiment_registry:
+            facts = _parse_json_list(skill.get("facts", "[]"))
+            if facts:
+                for fact in facts:
+                    content += f"- {fact}\n"
+            desc = skill.get("description", "")
+            if desc and not facts:
+                content += f"{desc}\n"
+            steps = skill.get("steps", "")
+            if steps:
+                content += f"\n{steps}\n"
+        content += "\n---\n\n"
+
+    # ── Section 5: Recurring Workflows ──────────────────────────────────
     if recurring_skills:
         content += "## Recurring Workflows\n\n"
         for skill in recurring_skills:
             content += _render_skill_compact(skill, _parse_json_list)
         content += "\n"
 
-    # Section 4: One-off reference (collapsed, minimal)
+    # ── Section 6: One-off Reference ────────────────────────────────────
     if oneoff_skills:
         content += "## Reference (One-Time Tasks)\n\n"
         content += "> These tasks are completed. Included for context only.\n\n"
@@ -140,6 +217,7 @@ def _render_skill_compact(skill: dict, _parse_json_list) -> str:
     tags = skill.get("tags", "")
     facts = _parse_json_list(skill.get("facts", "[]"))
     concepts = _parse_json_list(skill.get("concepts", "[]"))
+    templates = _parse_json_list(skill.get("command_templates", "[]"))
 
     text = f"### {title}\n\n"
     if desc:
@@ -153,6 +231,19 @@ def _render_skill_compact(skill: dict, _parse_json_list) -> str:
 
     if steps:
         text += f"**Steps:**\n{steps}\n\n"
+
+    # Inline command templates for this specific skill
+    if templates:
+        text += "**Commands:**\n"
+        for t in templates:
+            if isinstance(t, dict) and t.get("template"):
+                name = t.get("name", "")
+                tmpl = t["template"]
+                if name:
+                    text += f"- {name}: `{tmpl}`\n"
+                else:
+                    text += f"- `{tmpl}`\n"
+        text += "\n"
 
     # Tags and concepts on one line to save space
     meta_parts = []

@@ -45,9 +45,17 @@ def _skill_to_dict(row) -> dict:
     """Convert a SQLite Row to a clean skill dict."""
     d = dict(row)
     # Parse JSON list fields for cleaner output
-    for field in ("facts", "concepts", "files_read", "files_modified"):
+    for field in ("facts", "concepts", "files_read", "files_modified", "command_templates"):
         if field in d:
             d[field] = _parse_json_field(d[field])
+    # Parse file_map as dict
+    if "file_map" in d:
+        val = d["file_map"]
+        if isinstance(val, str):
+            try:
+                d["file_map"] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                d["file_map"] = {}
     # Ensure recurring field is exposed
     if "recurring" not in d:
         d["recurring"] = 1

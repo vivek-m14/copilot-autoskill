@@ -32,11 +32,11 @@ PROJECT: {project}
 Below is a batch of conversation history. Each conversation has USER prompts \
 and RESPONSE summaries.
 
-Response summaries now include actual terminal commands prefixed with [cmd], their output \
+Response summaries include actual terminal commands prefixed with [cmd], their output \
 prefixed with [output], and file edits prefixed with [edit]. Pay special attention to [cmd] \
-lines — these are the EXACT commands Copilot ran and are the most valuable signal for \
-creating reusable skills. When you see the same command pattern repeated across sessions \
-(even with different arguments), that's definitely a skill.
+lines — these are the EXACT commands the assistant ran and are the most valuable signal. \
+When you see the same command pattern repeated across sessions (even with different arguments), \
+that's definitely a skill.
 
 {conversations}
 
@@ -50,20 +50,43 @@ Examples: "make a flat dir", "run compare_experiments for X", "copy files from A
 3. For each pattern, produce a structured observation. Use placeholders like <PATH>, \
 <INPUT>, <DATASET> for variable parts so the skill is reusable.
 4. If an existing skill already covers a pattern, output an UPDATED version with \
-any new details merged in (keep the same skill_id).
+any new details merged in (keep the same skill_id). IMPORTANT: when newer conversations \
+contradict older facts in an existing skill (e.g. a threshold changed from 45 to 30, a flag \
+was renamed, a feature was implemented that was previously "planned"), UPDATE the skill with \
+the LATEST information. Newer sessions are the source of truth.
 5. If a pattern is genuinely new, create a new skill.
 6. Prefer MORE granular skills over fewer broad ones. A specific "Flatten directory \
 with symlinks" skill is better than lumping it into a generic "File operations" skill.
 7. Classify each skill as "recurring" (true) or "one-off" (false). One-off tasks are things \
 that already happened and won't need to be done again (initial setup, one-time data migrations, \
 specific bug fixes that are now resolved). Recurring tasks are workflows the user does regularly.
-8. Extract a special skill with title "Project Constants" (type: "discovery") containing \
-key project facts in the "facts" field: Python environment, working directory, data paths, \
-model architecture, device, and any formulas or naming conventions found in the conversations. \
-This eliminates tokens wasted rediscovering these per session.
-9. For recurring command patterns, include the EXACT command template in the "steps" field \
-with placeholders like <EXP_DIR>, <NAME>, <INPUT_DIR>. The [cmd] lines in the conversation \
-are the source of truth for these templates.
+
+8. Extract a "Project Constants" skill (type: "discovery") with ALL of these in "facts":
+   - Model architecture (name, params, channels, classes)
+   - Key formulas (blend formula, reconstruction formula, loss functions)
+   - Local paths (data_root, model checkpoints, output dirs)
+   - Remote/server paths (e.g. Kratos)
+   - Device info (mps/cuda/cpu)
+   - Benchmark numbers (inference times, model sizes)
+   - Config defaults (thresholds, learning rates, batch sizes)
+   Do NOT say "planned but not yet implemented" for something that IS implemented in the \
+   conversations. If you see it working in [cmd] output, it's implemented.
+
+9. Extract EXACT command templates in "command_templates" field — a JSON array of objects \
+each with "name" (short label), "template" (the full command with placeholders), and \
+"description" (one-line explanation). Source these from [cmd] lines. Include ALL flags \
+the user actually uses. Example:
+   {{"name": "validate model", "template": "python compare_experiments.py --mode val --exp-dir <EXP_DIR> --data-root double_chin_images --device mps", "description": "Run validation metrics on an experiment"}}
+
+10. Extract a "File Map" skill (type: "discovery") mapping files to their key symbols. \
+Put this in "file_map" field as a JSON object: {{"path/to/file.py": ["ClassName", "function_name", "CONSTANT"], ...}}. \
+Focus on files that appear repeatedly in [edit] and [cmd] lines. The goal is that a new \
+developer (or AI) can instantly find where MetricsCollector, DoubleChinRemover, etc. live.
+
+11. If the project uses numbered experiments (exp1, exp2, exp7, etc.), create an \
+"Experiment Registry" skill (type: "discovery") with "facts" listing each experiment \
+and its distinguishing config (ROI type, face pose, checkpoint, special flags). Format: \
+"exp7: ROI face-oval, yaw_threshold 30, checkpoint best_model.pth"
 
 Respond with a JSON array of skill objects (no markdown fences). Each object has:
 - "skill_id": string — reuse the existing id if updating, or "new" for new skills
@@ -72,10 +95,12 @@ Respond with a JSON array of skill objects (no markdown fences). Each object has
 - "description": one-sentence summary
 - "steps": markdown bullet list of reusable steps
 - "tags": list of 3-5 keyword tags
-- "facts": list of 2-5 discrete factual assertions (e.g. "script expects --input and --output flags", "output goes to /results/")
-- "concepts": list of 2-4 high-level concepts this relates to (e.g. "image-processing", "data-pipeline", "deployment")
-- "files": list of file/directory paths mentioned or relevant (can be empty)
-- "recurring": boolean — true if this pattern will likely recur (e.g. "run experiment comparison", "deploy model"), false if it was a one-time task (e.g. "initial data migration", "one-time zip creation", "one-time git config fix")
+- "facts": list of discrete factual assertions (e.g. "yaw_threshold: 30 degrees", "model: BaseUNetHalfLite 3.36M params")
+- "concepts": list of 2-4 high-level concepts
+- "files": list of file/directory paths mentioned or relevant
+- "file_map": object mapping file paths to their key symbols/classes/functions (optional, mainly for File Map skill)
+- "command_templates": list of {{"name": str, "template": str, "description": str}} (optional, for workflow skills)
+- "recurring": boolean — true if this will recur, false if one-time
 
 Respond ONLY with the JSON array."""
 
@@ -213,7 +238,7 @@ def _normalize_skill(skill_data: dict) -> dict:
     elif not isinstance(tags, str):
         skill_data["tags"] = str(tags)
     # Normalize structured observation fields to JSON strings
-    for json_field in ("facts", "concepts", "files_read", "files_modified"):
+    for json_field in ("facts", "concepts", "files_read", "files_modified", "command_templates"):
         val = skill_data.get(json_field)
         if isinstance(val, list):
             skill_data[json_field] = json.dumps(val)
@@ -225,6 +250,17 @@ def _normalize_skill(skill_data: dict) -> dict:
                 json.loads(val)
             except json.JSONDecodeError:
                 skill_data[json_field] = json.dumps([val])
+    # Normalize file_map (dict field, not list)
+    file_map = skill_data.get("file_map")
+    if isinstance(file_map, dict):
+        skill_data["file_map"] = json.dumps(file_map)
+    elif file_map is None:
+        skill_data["file_map"] = "{}"
+    elif isinstance(file_map, str):
+        try:
+            json.loads(file_map)
+        except json.JSONDecodeError:
+            skill_data["file_map"] = "{}"
     # Handle "files" as a combined field → split into files_read
     if "files" in skill_data and "files_read" not in skill_data:
         files_val = skill_data.pop("files")
@@ -353,7 +389,8 @@ def _load_project_conversations(conn, project_path: str, full: bool = False) -> 
 def _load_existing_skills(conn, project_path: str) -> list[dict]:
     """Load existing skills for a project."""
     rows = conn.execute(
-        "SELECT id, title, description, steps, tags, obs_type, facts, concepts, files_read "
+        "SELECT id, title, description, steps, tags, obs_type, facts, concepts, files_read, "
+        "file_map, command_templates "
         "FROM skills WHERE project_path = ?",
         (project_path,),
     ).fetchall()
@@ -417,6 +454,12 @@ def _format_existing_skills(skills: list[dict]) -> str:
         concepts = s.get("concepts", "[]")
         if concepts and concepts != "[]":
             lines.append(f"  Concepts: {concepts[:150]}")
+        file_map = s.get("file_map", "{}")
+        if file_map and file_map != "{}":
+            lines.append(f"  FileMap: {file_map[:300]}")
+        cmd_templates = s.get("command_templates", "[]")
+        if cmd_templates and cmd_templates != "[]":
+            lines.append(f"  Commands: {cmd_templates[:300]}")
         parts.append("\n".join(lines))
     skills_text = "\n\n".join(parts)
     return EXISTING_SKILLS_HEADER.format(skills_text=skills_text)
@@ -700,7 +743,8 @@ def distill(
                     # Update existing skill
                     conn.execute(
                         "UPDATE skills SET title=?, description=?, steps=?, tags=?, "
-                        "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=?, recurring=? "
+                        "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, "
+                        "narrative=?, recurring=?, file_map=?, command_templates=? "
                         "WHERE id=?",
                         (
                             skill_data["title"],
@@ -714,6 +758,8 @@ def distill(
                             skill_data.get("files_modified", "[]"),
                             skill_data.get("narrative", ""),
                             skill_data.get("recurring", 1),
+                            skill_data.get("file_map", "{}"),
+                            skill_data.get("command_templates", "[]"),
                             skill_id,
                         ),
                     )
@@ -739,7 +785,8 @@ def distill(
                         new_id = dup["id"]
                         conn.execute(
                             "UPDATE skills SET description=?, steps=?, tags=?, "
-                            "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, narrative=?, recurring=? "
+                            "obs_type=?, facts=?, concepts=?, files_read=?, files_modified=?, "
+                            "narrative=?, recurring=?, file_map=?, command_templates=? "
                             "WHERE id=?",
                             (
                                 skill_data.get("description", ""),
@@ -752,6 +799,8 @@ def distill(
                                 skill_data.get("files_modified", "[]"),
                                 skill_data.get("narrative", ""),
                                 skill_data.get("recurring", 1),
+                                skill_data.get("file_map", "{}"),
+                                skill_data.get("command_templates", "[]"),
                                 new_id,
                             ),
                         )
@@ -760,8 +809,9 @@ def distill(
                     else:
                         conn.execute(
                             "INSERT INTO skills (id, title, description, steps, tags, project_path, "
-                            "source_session_ids, obs_type, facts, concepts, files_read, files_modified, narrative, recurring) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "source_session_ids, obs_type, facts, concepts, files_read, files_modified, "
+                            "narrative, recurring, file_map, command_templates) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 new_id,
                                 skill_data["title"],
@@ -777,6 +827,8 @@ def distill(
                                 skill_data.get("files_modified", "[]"),
                                 skill_data.get("narrative", ""),
                                 skill_data.get("recurring", 1),
+                                skill_data.get("file_map", "{}"),
+                                skill_data.get("command_templates", "[]"),
                             ),
                         )
                         stats["skills_created"] += 1
