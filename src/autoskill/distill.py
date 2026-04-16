@@ -17,7 +17,8 @@ from pathlib import Path
 from .db import get_db, DEFAULT_DB_DIR
 
 SKILLS_DIR = DEFAULT_DB_DIR / "skills"
-BATCH_SIZE = 10  # sessions per LLM call
+BATCH_SIZE = 5  # sessions per LLM call (keep prompts under 30K chars)
+MAX_PROMPT_CHARS = 40_000  # hard cap on prompt size
 DEFAULT_MODEL = "claude-sonnet-4.6"  # good balance of cost and quality for summarization
 
 # ── Prompt templates ────────────────────────────────────────────────────────
@@ -148,7 +149,7 @@ def _call_copilot(prompt: str, model: str | None = None) -> str:
                 f'gh copilot -- -p "$(cat {tmp_path})" --model {model_arg}'
             )
             result = subprocess.run(
-                shell_cmd, shell=True, capture_output=True, text=True, timeout=300
+                shell_cmd, shell=True, capture_output=True, text=True, timeout=600
             )
         finally:
             os.unlink(tmp_path)
@@ -343,7 +344,7 @@ def _load_project_conversations(conn, project_path: str, full: bool = False) -> 
             sessions[sid] = {"session_id": sid, "messages": [], "max_msg_id": 0}
         sessions[sid]["messages"].append({
             "user": r["user_text"],
-            "response": (r["response_summary"] or "")[:300],
+            "response": (r["response_summary"] or "")[:2000],
         })
         sessions[sid]["max_msg_id"] = max(sessions[sid]["max_msg_id"], r["msg_id"])
     return list(sessions.values())
@@ -359,6 +360,33 @@ def _load_existing_skills(conn, project_path: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _truncate_response(resp: str, max_len: int = 600) -> str:
+    """Smart truncation: keep [cmd] and [edit] lines, drop verbose [output] blocks."""
+    if not resp or len(resp) <= max_len:
+        return resp
+    lines = resp.split("\n")
+    kept: list[str] = []
+    size = 0
+    for line in lines:
+        # Always keep command and edit lines (most valuable signal)
+        if line.startswith("[cmd]") or line.startswith("[edit]"):
+            kept.append(line[:300])
+            size += len(kept[-1])
+        # Truncate output lines aggressively
+        elif line.startswith("[output"):
+            short = line[:150]
+            if size + len(short) < max_len:
+                kept.append(short)
+                size += len(short)
+        # Keep other lines if space allows
+        elif size + len(line) < max_len:
+            kept.append(line[:200])
+            size += len(kept[-1])
+        if size >= max_len:
+            break
+    return "\n".join(kept)
+
+
 def _format_conversations_for_prompt(sessions: list[dict]) -> str:
     """Format a batch of sessions into text for the LLM prompt."""
     parts = []
@@ -367,7 +395,7 @@ def _format_conversations_for_prompt(sessions: list[dict]) -> str:
         for msg in sess["messages"][:30]:  # cap messages per session
             lines.append(f"USER: {msg['user'][:200]}")
             if msg["response"]:
-                lines.append(f"RESPONSE: {msg['response'][:200]}")
+                lines.append(f"RESPONSE: {_truncate_response(msg['response'])}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
